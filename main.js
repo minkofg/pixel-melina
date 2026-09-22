@@ -11,6 +11,15 @@ function groundY() {
   const wa = screen.getPrimaryDisplay().workArea;
   return wa.y + wa.height - WIN_H;
 }
+// 诊断：把坐标账记进 render.log，排查"回到地面偏低"
+function logGeo(tag) {
+  try {
+    const d = screen.getPrimaryDisplay();
+    mlog(tag + ': bounds=' + JSON.stringify(d.bounds) + ' workArea=' + JSON.stringify(d.workArea) +
+         ' scaleFactor=' + d.scaleFactor + ' win=' + (win ? JSON.stringify(win.getBounds()) : 'null') +
+         ' groundY=' + groundY());
+  } catch (e) {}
+}
 
 function createWindow() {
   const { width } = screen.getPrimaryDisplay().workArea;
@@ -47,6 +56,7 @@ function createWindow() {
     logStream.write(new Date().toISOString() + ' [GONE] ' + JSON.stringify(details) + '\n');
   });
   win.on('closed', () => { win = null; });
+  logGeo('boot');
 }
 
 ipcMain.on('set-ignore', (e, ignore) => {
@@ -84,6 +94,7 @@ ipcMain.on('go-home', () => {
   const ny = groundY();   // 与启动时同一套地面算法，不会偏低/偏高
   win.setPosition(0, ny);
   win.webContents.send('set-winy', ny);   // 同步窗口坐标，赐福保持钉在地面
+  logGeo('go-home');
 });
 ipcMain.on('quit-app', () => app.quit());
 

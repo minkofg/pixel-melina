@@ -154,6 +154,8 @@
       }
     }
     console.log('PIXEL MELINA frames ready:', Object.keys(frames).join(','));
+    console.log('PIXEL MELINA metrics: inner=' + window.innerWidth + 'x' + window.innerHeight +
+                ' DW=' + DW + ' DH=' + DH + ' dpr=' + window.devicePixelRatio);
     // 预热本地模型（首次聊天不用等加载）
     if (ipc) ipc.send('llm-preload');
     // 启动问候
