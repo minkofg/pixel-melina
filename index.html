@@ -362,9 +362,17 @@
   ];
   // 触发一段特殊动作
   function playSpecial(name, ms) {
+    cancelRest();   // 动作打断休整：赐福淡出、复位标志，防止赐福一直挂着
     state = 'special'; specialName = name;
     stateUntil = performance.now() + ms;
     animClock = 0;
+  }
+  // 结束休整（坐下/走路途中被打断时）：赐福淡出、复位标志、进入冷却
+  function cancelRest() {
+    if (state === 'rest' || restPending) {
+      restPending = false; manualRest = false; graceTarget = 0;
+      restCooldown = performance.now() + 30000;
+    }
   }
 
   // ---- 聊天（本地模型，主进程 node-llama-cpp 推理，纯离线） ----
@@ -530,6 +538,7 @@
       closeActions();
       if (dragging || state === 'drag') return;
       if (name === 'walk') {
+        cancelRest();   // 走开前先收起赐福
         state = 'walk';
         facing = Math.random() < 0.5 ? -1 : 1;
         stateUntil = performance.now() + 3200;
