@@ -31,6 +31,10 @@ function createWindow() {
   const fs = require('fs');
   const logStream = fs.createWriteStream(require('path').join(__dirname, 'render.log'), { flags: 'a' });
   win.webContents.on('console-message', (e, level, message, line, sourceId) => {
+    // 兼容新旧 Electron 事件签名（新版把 level/message 等挂在 event 对象上）
+    if (message === undefined && e && typeof e === 'object') {
+      level = e.level; message = e.message; line = e.lineNumber; sourceId = e.sourceId;
+    }
     logStream.write(new Date().toISOString() + ' [L' + level + '] ' + message + ' @' + sourceId + ':' + line + '\n');
   });
   win.webContents.on('render-process-gone', (e, details) => {
@@ -172,5 +176,10 @@ ipcMain.handle('chat-llm', async (e, userText) => {
 });
 app.on('before-quit', () => { if (worker) { try { worker.kill(); } catch (e) {} worker = null; } });
 
-app.whenReady().then(createWindow);
-app.on('window-all-closed', () => app.quit());
+// 单实例锁：防止双击两次 bat 跑出两只梅琳娜
+if (!app.requestSingleInstanceLock()) {
+  app.quit();
+} else {
+  app.whenReady().then(createWindow);
+  app.on('window-all-closed', () => app.quit());
+}

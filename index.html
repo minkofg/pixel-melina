@@ -334,8 +334,8 @@
   ];
   (function idleChatter() {
     setTimeout(() => {
-      // 对话中不打岔
-      if (!isChatting() && chatbox.style.display !== 'block') say(IDLE_LINES[Math.floor(Math.random() * IDLE_LINES.length)]);
+      // 对话中不打岔；休整讲故事时也不打岔（否则闲话会盖掉正在讲的故事）
+      if (!isChatting() && state !== 'rest' && chatbox.style.display !== 'block') say(IDLE_LINES[Math.floor(Math.random() * IDLE_LINES.length)]);
       idleChatter();
     }, 50000 + Math.random() * 70000);
   })();
@@ -370,18 +370,17 @@
   // ---- 聊天（本地模型，主进程 node-llama-cpp 推理，纯离线） ----
   const chatbox = document.getElementById('chatbox');
   const chatinput = document.getElementById('chatinput');
-  let chatBusy = false;                       // 正在等本地模型回复
+  let chatPending = 0;                        // 正在等本地模型回复的数量（可能有多条排队）
   function isChatting() {
     // 对话框开着，或她正在组织回复——期间暂停所有随机事件
-    return chatbox.style.display === 'block' || chatBusy;
+    return chatbox.style.display === 'block' || chatPending > 0;
   }
 
   async function chat(text) {
-    chatBusy = true;
+    chatPending++;
     say('……', 0);
     try {
       const r = await ipc.invoke('chat-llm', text);
-      chatBusy = false;
       if (r && r.ok && r.reply) {
         say(r.reply.trim(), 9000);
         // 回复后的小反应——坐着休整时保持坐姿，不起身（否则赐福还挂着人却站起来了）
@@ -400,8 +399,9 @@
         }
       }
     } catch (err) {
-      chatBusy = false;
       say('（……她好像走神了，再试一次。）', 6000);
+    } finally {
+      chatPending--;
     }
   }
 
@@ -688,7 +688,8 @@
           state = 'walk';
           const target = Math.max(0, graceX - DW + 15);   // 坐在赐福左侧，不挡火苗
           facing = target >= x ? 1 : -1;
-          stateUntil = now + 15000;
+          // 超时按路程估算：宽屏上固定 15 秒走不到，休整会半路夭折
+          stateUntil = now + Math.max(15000, (Math.abs(target - x) / WALK_SPEED) * 1000 + 8000);
           console.log('REST: walking to', target, 'from', x);
         } else if (roll < 0.42) {
           state = 'walk';

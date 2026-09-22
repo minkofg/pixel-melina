@@ -1,7 +1,11 @@
 {
   "name": "pixel-melina",
-  "version": "1.0.0",
+  "version": "1.1.0",
+  "description": "梅琳娜桌面宠物：完全离线的本地 AI 桌宠（Electron + node-llama-cpp）",
   "main": "main.js",
+  "scripts": {
+    "start": "electron ."
+  },
   "dependencies": {
     "node-llama-cpp": "^3.21.1"
   }

@@ -15,21 +15,27 @@ const MAX_TOKENS = 160;
 const MAX_USER_TURNS = 12;
 
 let llm = null;   // { mod, model, context, session }
+let llmPromise = null;   // 进行中的加载承诺：防止并发 getLlm 重复加载模型（内存翻倍 + 上下文泄漏）
 
-async function getLlm() {
-  if (llm) return llm;
-  const mod = await import('node-llama-cpp');
-  const llama = await mod.getLlama();
-  const model = await llama.loadModel({ modelPath: MODEL_PATH, gpuLayers: 0 });
-  const context = await model.createContext({ threads: Math.max(2, require('os').cpus().length - 1) });
-  llm = {
-    mod, model, context,
-    session: new mod.LlamaChatSession({
-      contextSequence: context.getSequence(),
-      systemPrompt: SYSTEM_PROMPT,
-    }),
-  };
-  return llm;
+function getLlm() {
+  if (llm) return Promise.resolve(llm);
+  if (!llmPromise) {
+    llmPromise = (async () => {
+      const mod = await import('node-llama-cpp');
+      const llama = await mod.getLlama();
+      const model = await llama.loadModel({ modelPath: MODEL_PATH, gpuLayers: 0 });
+      const context = await model.createContext({ threads: Math.max(2, require('os').cpus().length - 1) });
+      llm = {
+        mod, model, context,
+        session: new mod.LlamaChatSession({
+          contextSequence: context.getSequence(),
+          systemPrompt: SYSTEM_PROMPT,
+        }),
+      };
+      return llm;
+    })().catch((err) => { llmPromise = null; throw err; });   // 加载失败时重置，允许下次重试
+  }
+  return llmPromise;
 }
 
 async function resetSession(keepHistory) {
@@ -44,24 +50,28 @@ async function resetSession(keepHistory) {
   try { oldCtx.dispose(); } catch (e) {}
 }
 
+async function handleReq(req) {
+  try {
+    await getLlm();
+    // 超过 12 轮：保留 system + 最近 8 条，重开会话防越聊越慢
+    const hist = llm.session.getChatHistory();
+    if (hist.filter(h => h.role === 'user').length > MAX_USER_TURNS) {
+      await resetSession(hist.slice(0, 1).concat(hist.slice(-8)));
+    }
+    const reply = await llm.session.prompt(String(req.text || '……'), { maxTokens: MAX_TOKENS });
+    process.stdout.write(JSON.stringify({ type: 'reply', id: req.id, ok: true, reply }) + '\n');
+  } catch (err) {
+    process.stdout.write(JSON.stringify({ type: 'reply', id: req.id, ok: false, error: String((err && err.message) || err) }) + '\n');
+  }
+}
+
 const rl = readline.createInterface({ input: process.stdin, terminal: false });
+// 串行队列：LlamaChatSession 不可重入，并发 prompt 会互相干扰（真实库中会报错或产出混乱）
+let queue = Promise.resolve();
 rl.on('line', (line) => {
   let req;
   try { req = JSON.parse(line); } catch (e) { return; }
-  (async () => {
-    try {
-      await getLlm();
-      // 超过 12 轮：保留 system + 最近 8 条，重开会话防越聊越慢
-      const hist = llm.session.getChatHistory();
-      if (hist.filter(h => h.role === 'user').length > MAX_USER_TURNS) {
-        await resetSession(hist.slice(0, 1).concat(hist.slice(-8)));
-      }
-      const reply = await llm.session.prompt(String(req.text || '……'), { maxTokens: MAX_TOKENS });
-      process.stdout.write(JSON.stringify({ type: 'reply', id: req.id, ok: true, reply }) + '\n');
-    } catch (err) {
-      process.stdout.write(JSON.stringify({ type: 'reply', id: req.id, ok: false, error: String((err && err.message) || err) }) + '\n');
-    }
-  })();
+  queue = queue.then(() => handleReq(req)).catch(() => {});
 });
 
 // 启动即预热
