@@ -50,6 +50,10 @@ electron .                 # 或双击 启动梅琳娜.bat
 - `llm_worker.js` —— 独立推理子进程（node-llama-cpp），stdio JSON 通信，崩溃不影响本体
 - `models/` —— Qwen2.5-1.5B-Instruct GGUF 量化（Apache-2.0）
 
+## 友情链接
+
+- [LINUX DO](https://linux.do) —— 新的理想型技术社区，欢迎来逛
+
 ## 版权说明
 
 本项目为粉丝二创（fan art）。梅琳娜角色及《艾尔登法环》版权归 FromSoftware / 万代南梦宫所有，请勿用于商业用途。
