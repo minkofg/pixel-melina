@@ -33,7 +33,7 @@ function createWindow() {
     hasShadow: false,
     alwaysOnTop: true,
     skipTaskbar: true,
-    resizable: false,
+    resizable: true,   // 无边框窗口没有可拖的边框；且 Windows 对 resizable:false 的 setBounds 有尺寸怪癖
     webPreferences: {
       nodeIntegration: true,
       contextIsolation: false
@@ -59,6 +59,16 @@ function createWindow() {
   logGeo('boot');
 }
 
+// ---- 窗口定位：一律走 setBounds 全量设置 ----
+// 坑：Windows + 非整数 DPI 缩放下，对 resizable:false 的无边框窗口反复 setPosition，
+// DIP↔物理像素舍入误差会逐次累积，窗口被越撑越高（330 → 400+），精灵随 clientHeight
+// 下移 = "回到地面后越沉越低"。setBounds 显式锁死宽高，每次调用都纠正回 WIN_H。
+function placeWindow(y) {
+  if (!win || win.isDestroyed()) return;
+  const width = screen.getPrimaryDisplay().workArea.width;
+  win.setBounds({ x: 0, y: Math.round(y), width: Math.round(width), height: WIN_H });
+}
+
 ipcMain.on('set-ignore', (e, ignore) => {
   if (win) win.setIgnoreMouseEvents(ignore, { forward: true });
 });
@@ -79,9 +89,8 @@ ipcMain.on('drag-start', (e, g) => {
     const sx = Math.max(0, Math.min(c.x - g.gx, sw - g.dw));
     const sy = Math.max(wa.y, Math.min(c.y - g.gy, wa.y + sh - g.dh));
     // 窗口全宽固定 x=0，竖直方向=精灵顶 - 精灵在窗口内的偏移
-    const ny = Math.round(sy - g.floor);
-    win.setPosition(0, ny);
-    if (!win.isDestroyed()) win.webContents.send('drag-pos', Math.round(sx), ny);
+    placeWindow(Math.round(sy - g.floor));
+    if (!win.isDestroyed()) win.webContents.send('drag-pos', Math.round(sx), Math.round(sy - g.floor));
   }, 16);
 });
 ipcMain.on('drag-end', () => {
@@ -92,7 +101,7 @@ ipcMain.on('drag-end', () => {
 ipcMain.on('go-home', () => {
   if (!win) return;
   const ny = groundY();   // 与启动时同一套地面算法，不会偏低/偏高
-  win.setPosition(0, ny);
+  placeWindow(ny);
   win.webContents.send('set-winy', ny);   // 同步窗口坐标，赐福保持钉在地面
   logGeo('go-home');
 });
