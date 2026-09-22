@@ -1,0 +1,817 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<title>Pixel Melina</title>
+<style>
+  html, body {
+    margin: 0; padding: 0; width: 100%; height: 100%;
+    background: transparent; overflow: hidden;
+    user-select: none; -webkit-user-select: none;
+    cursor: default;
+  }
+  #stage { position: absolute; inset: 0; }
+  #grace { position: absolute; z-index: 4; }
+  #melina { position: absolute; z-index: 5; }
+  #bubble {
+    position: absolute; max-width: 340px;
+    background: #f5f2e8; color: #2b2320;
+    border: 2px solid #2b2320; box-shadow: 3px 3px 0 rgba(0,0,0,.45);
+    padding: 8px 12px; font: 13px/1.6 "Microsoft YaHei", sans-serif;
+    display: none; z-index: 10; word-break: break-word;
+  }
+  #bubble:after {
+    content: ""; position: absolute; bottom: -8px; left: var(--tail-x, 24px);
+    width: 12px; height: 12px; background: #f5f2e8;
+    border-right: 2px solid #2b2320; border-bottom: 2px solid #2b2320;
+    transform: rotate(45deg);
+  }
+  #chatbox {
+    position: absolute; display: none; z-index: 20;
+    background: #f5f2e8; border: 2px solid #2b2320;
+    box-shadow: 3px 3px 0 rgba(0,0,0,.45); padding: 6px;
+  }
+  #chatbox input {
+    width: 240px; border: none; outline: none; background: transparent;
+    font: 13px/1.5 "Microsoft YaHei", sans-serif; color: #2b2320;
+  }
+  #menu {
+    position: absolute; display: none; z-index: 20;
+    background: #f5f2e8; border: 2px solid #2b2320;
+    box-shadow: 3px 3px 0 rgba(0,0,0,.45); padding: 4px;
+  }
+  #menu button {
+    display: block; width: 110px; margin: 2px; padding: 5px 0;
+    background: #f5f2e8; border: 1px solid #2b2320; cursor: pointer;
+    font: 12px/1.4 "Microsoft YaHei", sans-serif; color: #2b2320;
+  }
+  #menu button:hover { background: #2b2320; color: #f5f2e8; }
+  #actions {
+    position: absolute; display: none; z-index: 20;
+    background: #f5f2e8; border: 2px solid #2b2320;
+    box-shadow: 3px 3px 0 rgba(0,0,0,.45); padding: 4px;
+    width: 236px;
+  }
+  #actions button {
+    display: inline-block; width: 110px; margin: 2px; padding: 5px 0;
+    background: #f5f2e8; border: 1px solid #2b2320; cursor: pointer;
+    font: 12px/1.4 "Microsoft YaHei", sans-serif; color: #2b2320;
+  }
+  #actions button:hover { background: #2b2320; color: #f5f2e8; }
+</style>
+</head>
+<body>
+<div id="stage">
+  <canvas id="grace" width="128" height="192"></canvas>
+  <canvas id="melina" width="192" height="208"></canvas>
+  <div id="bubble"></div>
+  <div id="chatbox"><input id="chatinput" placeholder="对梅琳娜说点什么…（Enter 发送，Esc 关闭）"></div>
+  <div id="menu">
+    <button id="btn-rest">去赐福休整</button>
+    <button id="btn-acts">动作列表</button>
+    <button id="btn-home">回到地面</button>
+    <button id="btn-quit">退出程序</button>
+  </div>
+  <div id="actions"></div>
+</div>
+<script>
+(() => {
+  // ===== Petdex 官方 Melina sprite sheet =====
+  // 1536x1872，8 列 x 9 行，单元格 192x208
+  const CELL_W = 192, CELL_H = 208;
+  const SCALE = 0.8;                       // 屏上约 154x166
+  const DW = Math.round(CELL_W * SCALE), DH = Math.round(CELL_H * SCALE);
+  const ROWS = {
+    idle:    { row: 0, frames: 6 },
+    runRight:{ row: 1, frames: 8 },
+    runLeft: { row: 2, frames: 8 },
+    wave:    { row: 3, frames: 4 },
+    jump:    { row: 4, frames: 5 },
+    failed:  { row: 5, frames: 8 },
+    wait:    { row: 6, frames: 6 },
+    bounce:  { row: 7, frames: 6 },   // 官方名 Running：正面原地蹦跳
+    blink:   { row: 8, frames: 6 },   // 未命名：眨眼/掩面小动作
+  };
+
+  const cvs = document.getElementById('melina');
+  const ctx = cvs.getContext('2d');
+  ctx.imageSmoothingEnabled = true;
+  cvs.style.width = DW + 'px'; cvs.style.height = DH + 'px';
+
+  // ---- 状态机 ----
+  let ipc = null;
+  try {
+    if (typeof require !== 'undefined' && require('electron')) {
+      ipc = require('electron').ipcRenderer || null;
+    }
+  } catch (e) { ipc = null; }
+
+  // 主进程拖拽轮询回传：x 同步 + 窗口 y（赐福要钉在真实地面用）
+  let winY = null, shHeight = null;
+  if (ipc) {
+    ipc.on('drag-pos', (e, sx, ny) => { if (dragging) { x = sx; winY = ny; } });
+    ipc.on('screen-info', (e, v) => { shHeight = v; });
+    ipc.on('set-winy', (e, ny) => { winY = ny; });
+  }
+
+  let x = Math.floor(window.innerWidth / 2 - DW / 2);
+  let facing = 1;
+  let state = 'idle';                   // idle | walk | special | drag | rest
+  let specialName = null;
+  let stateUntil = performance.now() + 2000;
+  let restPending = false;              // 正在走回赐福
+  let manualRest = false;               // 菜单手动触发的休整（坐得更久）
+  let restCooldown = 0;                 // 下次回赐福的最早时间
+  let dozeUntil = 0;                    // 坐着打瞌睡的结束时间
+  let nextDozeAt = 0;                   // 下次打瞌睡的最早时间
+  let animClock = 0;
+  let dragging = false;
+  let sheet = null;                     // Image
+  let frames = {};                      // animName -> [bitmap帧canvas]
+  let hitData = {};                     // animName -> [alpha data]
+  let frameIdx = 0;
+
+  const FLOOR = () => Math.max(0, document.documentElement.clientHeight - DH - 2);
+  function place() { cvs.style.left = x + 'px'; cvs.style.top = FLOOR() + 'px'; }
+  place();
+
+  // ---- 加载 sheet 并切帧 ----
+  const sheetImg = new Image();
+  sheetImg.src = 'melina_sprite.webp';
+  sheetImg.onload = () => {
+    sheet = sheetImg;
+    for (const name in ROWS) {
+      const { row, frames: n } = ROWS[name];
+      frames[name] = [];
+      hitData[name] = [];
+      for (let i = 0; i < n; i++) {
+        const c = document.createElement('canvas');
+        c.width = CELL_W; c.height = CELL_H;
+        const cc = c.getContext('2d');
+        cc.drawImage(sheet, i * CELL_W, row * CELL_H, CELL_W, CELL_H, 0, 0, CELL_W, CELL_H);
+        frames[name].push(c);
+        hitData[name].push(new Uint8Array(cc.getImageData(0, 0, CELL_W, CELL_H).data.filter((_, idx) => idx % 4 === 3)));
+      }
+    }
+    console.log('PIXEL MELINA frames ready:', Object.keys(frames).join(','));
+    // 预热本地模型（首次聊天不用等加载）
+    if (ipc) ipc.send('llm-preload');
+    // 启动问候
+    setTimeout(() => { say('……你来了，褪色者。', 4200); playSpecial('wave', 1800); }, 1800);
+  };
+
+  // ---- 自绘动作帧加载（横向条带：sit 坐姿 / nod 点头 / shake 摇头 / doze 打瞌睡） ----
+  function loadStrip(src, name, n) {
+    const img = new Image();
+    img.src = src;
+    img.onload = () => {
+      frames[name] = []; hitData[name] = [];
+      for (let i = 0; i < n; i++) {
+        const c = document.createElement('canvas');
+        c.width = CELL_W; c.height = CELL_H;
+        const cc = c.getContext('2d');
+        cc.drawImage(img, i * CELL_W, 0, CELL_W, CELL_H, 0, 0, CELL_W, CELL_H);
+        frames[name].push(c);
+        hitData[name].push(new Uint8Array(cc.getImageData(0, 0, CELL_W, CELL_H).data.filter((_, idx) => idx % 4 === 3)));
+      }
+      console.log('PIXEL MELINA', name, 'frames ready');
+    };
+  }
+  loadStrip('sit_sheet.png', 'sit', 2);
+  loadStrip('nod_sheet.png', 'nod', 4);
+  loadStrip('shake_sheet.png', 'shake', 8);
+  loadStrip('doze_sheet.png', 'doze', 6);
+  loadStrip('dance_sheet.png', 'dance', 8);   // 蹦迪：独立生成的摇摆+小跳+音符动画
+
+  // ---- 赐福（平时隐藏，只在她「回赐福休整」动作中出现） ----
+  const gcvs = document.getElementById('grace');
+  const gctx = gcvs.getContext('2d');
+  const GW = 128, GH = 192;                // 画布逻辑尺寸
+  const GS = 0.62;                         // 屏显缩放（整体缩小）
+  const GDW = Math.round(GW * GS), GDH = Math.round(GH * GS);
+  gcvs.style.width = GDW + 'px'; gcvs.style.height = GDH + 'px';
+  gcvs.style.display = 'none';
+  let graceImg = null, graceHit = null, graceX = 0;
+  let graceAlpha = 0, graceTarget = 0;     // 淡入淡出
+  function placeGrace() {
+    // 赐福跟着她走：底边永远与她的脚底对齐（她在哪，休整就在哪发生）
+    gcvs.style.left = graceX + 'px';
+    gcvs.style.top = (FLOOR() + DH - GDH) + 'px';
+  }
+  const graceImgEl = new Image();
+  graceImgEl.src = 'grace.png';
+  graceImgEl.onload = () => {
+    graceImg = graceImgEl;
+    const c = document.createElement('canvas');
+    c.width = GW; c.height = GH;
+    const cc = c.getContext('2d');
+    cc.drawImage(graceImgEl, 0, 0);
+    graceHit = new Uint8Array(cc.getImageData(0, 0, GW, GH).data.filter((_, i) => i % 4 === 3));
+  };
+  // 挑一个赐福落点（每次休整都换地方，像游戏里沿路出现）
+  function pickGraceSpot() {
+    graceX = Math.floor(60 + Math.random() * Math.max(80, window.innerWidth - DW - 160));
+  }
+  gcvs.addEventListener('click', () => {
+    if (graceAlpha < 0.5) return;
+    say('……赐福在燃烧。把手伸过来，就能感知到。', 4200);
+  });
+
+  // 金尘粒子 + 脉动光晕
+  const motes = [];
+  let lastMote = 0;
+  function drawGrace(now, dt) {
+    if (!graceImg || gcvs.style.display === 'none') return;
+    // 淡入淡出
+    graceAlpha += (graceTarget - graceAlpha) * Math.min(1, dt / 280);
+    if (graceTarget === 0 && graceAlpha < 0.03) { gcvs.style.display = 'none'; graceAlpha = 0; return; }
+    gctx.clearRect(0, 0, GW, GH);
+    gctx.globalAlpha = Math.min(1, graceAlpha);
+    gctx.drawImage(graceImg, 0, 0);
+    const resting = (state === 'rest');
+    const base = resting ? 0.5 : 0.26;
+    const a = base + Math.sin(now / 450) * 0.12;
+    const R = (resting ? 46 : 34) + Math.sin(now / 450) * 6;
+    const grad = gctx.createRadialGradient(63, 92, 4, 63, 92, Math.max(10, R));
+    grad.addColorStop(0, 'rgba(255,232,150,' + Math.max(0, a).toFixed(3) + ')');
+    grad.addColorStop(1, 'rgba(255,214,100,0)');
+    gctx.fillStyle = grad;
+    gctx.fillRect(0, 0, GW, GH);
+    if (graceAlpha > 0.6 && now - lastMote > (resting ? 160 : 420)) {
+      lastMote = now;
+      motes.push({ x: 38 + Math.random() * 52, y: 80 + Math.random() * 60, vy: 14 + Math.random() * 20, life: 1, r: 1 + Math.random() * 1.6 });
+    }
+    for (let i = motes.length - 1; i >= 0; i--) {
+      const m = motes[i];
+      m.y -= m.vy * dt / 1000;
+      m.life -= dt / 2600;
+      if (m.life <= 0) { motes.splice(i, 1); continue; }
+      gctx.globalAlpha = Math.max(0, m.life) * 0.9 * Math.min(1, graceAlpha);
+      gctx.fillStyle = '#ffe9a0';
+      gctx.fillRect(m.x, m.y, m.r, m.r);
+    }
+    gctx.globalAlpha = 1;
+  }
+
+  // ---- 气泡（每帧跟随她的位置） ----
+  const bubble = document.getElementById('bubble');
+  let bubbleTimer = null;
+  function positionBubble() {
+    if (bubble.style.display !== 'block') return;
+    // 按气泡实际宽度钳制在窗口内，避免贴右边缘时被推走跟不上
+    const bw = bubble.offsetWidth || 200;
+    let left = x + DW / 2 - 60;              // 默认：尾巴大致在她中心
+    left = Math.max(4, Math.min(left, window.innerWidth - bw - 4));
+    bubble.style.left = left + 'px';
+    bubble.style.top = Math.max(2, FLOOR() - 56) + 'px';
+    // 尾巴始终指向她的中心
+    const tail = Math.max(14, Math.min(x + DW / 2 - left - 6, bw - 46));
+    bubble.style.setProperty('--tail-x', tail + 'px');
+  }
+  function say(text, ms) {
+    bubble.textContent = text;
+    bubble.style.display = 'block';
+    positionBubble();
+    clearTimeout(bubbleTimer);
+    if (ms !== 0) bubbleTimer = setTimeout(() => bubble.style.display = 'none', ms || 5200);
+  }
+  function hideBubble() { bubble.style.display = 'none'; clearTimeout(bubbleTimer); }
+
+  const IDLE_LINES = [
+    '……在赐福稍作休整吧。',
+    '……褪色者，工作太久，对身体不好。',
+    '黄金树的微光，仍在照耀着你。',
+    '……我在寻找。也在陪伴。',
+    '愿卢恩指引你的前路。',
+    '……走吧，漫长的征途还在后面。',
+    '托雷特在等你呢。……开玩笑的。',
+    '……有我在。',
+    '……赐福的暖意，能驱散一点疲惫。',
+    '黄金树在看着你。',
+    '……休息，也是一种前进。'
+  ];
+  const REST_LINES = [
+    '……在赐福稍作休整吧。',
+    '……赐福的暖意，能驱散一点疲惫。',
+    '……在这里，能听见黄金树的声音。',
+    '……休整片刻。前路还长。'
+  ];
+  // 赐福边休整边讲的交界地故事（她的视角，分集播放，讲完一轮从头再来）
+  const STORY = [
+    '……那就讲讲这片交界地的故事吧。从黄金树讲起。',
+    '很久以前，无上意志把金色流星与野兽送到了这里。艾尔登法环，就此成形。',
+    '法环生出黄金树，树的光辉洒满交界地。那是最初的秩序。',
+    '我的母亲……永恒女王玛丽卡，成为法环的容器。她以此统治交界地。',
+    '她取出了「命定之死」，交由兄长玛利喀斯看守。从此，交界地再无真正的死亡。',
+    '第一代王夫是葛孚雷，初代艾尔登之王。战无不胜，却失去了赐福，被放逐出境。',
+    '第二代王夫，是红发的拉达冈。他后来……与我母亲共为一体。这是很久以后才揭晓的事。',
+    '半神们诞生了：葛德文、蒙葛特、蒙格、菈妮、拉塔恩、莱卡德、玛莲妮亚……',
+    '然后，是黑刀之夜。死亡卢恩的碎片被盗，黄金葛德文的灵魂被杀。',
+    '那是交界地第一个死者。不死的世界，从此破了一角。',
+    '玛丽卡悲痛之下，亲手击碎了艾尔登法环。……她到底在想什么，无人知晓。',
+    '法环碎片化作大卢恩，被半神们瓜分。力量，让他们疯了。',
+    '破碎战争爆发。半神们互相征伐，没有胜者，只有满地疮痍。',
+    '接枝的葛瑞克、满月女王蕾娜菈、碎星拉塔恩、亵渎君王莱卡德……',
+    '还有恶兆王蒙葛特、鲜血君王蒙格，和腐败女神玛莲妮亚。战争没有尽头。',
+    '无上意志放弃了争吵的半神，转而召回被放逐的褪色者。赐福重新点亮。',
+    '……你，就是其中之一。从漂流墓地醒来，循着赐福的指引来到这里。',
+    '我与你定下契约，把托雷特交给你。目的地只有一个：黄金树。',
+    '可黄金树的荆棘拒绝所有人。想修复法环，必须先烧掉它。',
+    '我，就是那把火。作为母亲留下的种火，在巨人炉点燃了自己。',
+    '火起之时，命定之死也被释放。黑剑玛利喀斯，倒在了你的剑下。',
+    '灰烬王城里，你先后击败初代王葛孚雷、拉达冈，以及……艾尔登之兽。',
+    '拉达冈与玛丽卡本是一体两面。你最终面对的，是神本身。',
+    '之后的事，取决于你的选择：成为艾尔登之王，或让菈妮开启群星时代……',
+    '……或者拥抱癫火，把一切烧成虚无。每个结局，都是一次新时代的分娩。',
+    '……交界地的故事，到这里就讲完了。愿你写出属于自己的结局，褪色者。'
+  ];
+  let storyIdx = 0;          // 讲到哪一集了（跨休整续播）
+  let nextStoryAt = 0;       // 下一集的最早时间
+  const PAT_LINES = [
+    '……头、头发会乱。',
+    '……嗯。再多一会儿，也无妨。',
+    '……别把斗篷弄皱了。'
+  ];
+  (function idleChatter() {
+    setTimeout(() => {
+      // 对话中不打岔
+      if (!isChatting() && chatbox.style.display !== 'block') say(IDLE_LINES[Math.floor(Math.random() * IDLE_LINES.length)]);
+      idleChatter();
+    }, 50000 + Math.random() * 70000);
+  })();
+
+  // ---- 交互台词 ----
+  const CLICK_LINES = [
+    '……叫我吗。',
+    '怎么了，褪色者。',
+    '……我在听。',
+    '……嗯。',
+    '有话要说？',
+    '……别急，慢慢说。'
+  ];
+  const GRAB_LINES = [
+    '……要带我去哪里。',
+    '……放我下来，好吗。',
+    '……这样不太体面。',
+    '……好吧，随你。'
+  ];
+  const DROP_LINES = [
+    '……下次先说一声。',
+    '……呼。',
+    '……危险的动作。'
+  ];
+  // 触发一段特殊动作
+  function playSpecial(name, ms) {
+    state = 'special'; specialName = name;
+    stateUntil = performance.now() + ms;
+    animClock = 0;
+  }
+
+  // ---- 聊天（本地模型，主进程 node-llama-cpp 推理，纯离线） ----
+  const chatbox = document.getElementById('chatbox');
+  const chatinput = document.getElementById('chatinput');
+  let chatBusy = false;                       // 正在等本地模型回复
+  function isChatting() {
+    // 对话框开着，或她正在组织回复——期间暂停所有随机事件
+    return chatbox.style.display === 'block' || chatBusy;
+  }
+
+  async function chat(text) {
+    chatBusy = true;
+    say('……', 0);
+    try {
+      const r = await ipc.invoke('chat-llm', text);
+      chatBusy = false;
+      if (r && r.ok && r.reply) {
+        say(r.reply.trim(), 9000);
+        // 回复后的小反应——坐着休整时保持坐姿，不起身（否则赐福还挂着人却站起来了）
+        if (state !== 'rest') {
+          const roll = Math.random();
+          if (roll < 0.35) playSpecial('wave', 1800);
+          else if (roll < 0.55) playSpecial('bounce', 1400);
+          else if (roll < 0.70) playSpecial('blink', 1500);
+        }
+      } else {
+        const err = (r && r.error) || '';
+        if (err.indexOf('MODEL_MISSING') >= 0) {
+          say('（本地模型文件缺失：models/Qwen2.5-1.5B-Instruct-Q4_K_M.gguf）', 8000);
+        } else {
+          say('（……她好像走神了。' + err.slice(0, 60) + '）', 6000);
+        }
+      }
+    } catch (err) {
+      chatBusy = false;
+      say('（……她好像走神了，再试一次。）', 6000);
+    }
+  }
+
+  cvs.addEventListener('dblclick', () => {
+    if (dragging) return;
+    closeMenu();
+    closeActions();
+    chatbox.style.display = 'block';
+    chatbox.style.left = Math.max(4, Math.min(x + DW / 2 - 130, window.innerWidth - 280)) + 'px';
+    chatbox.style.top = Math.max(2, FLOOR() - 44) + 'px';
+    chatinput.focus();
+  });
+  chatinput.addEventListener('keydown', (e) => {
+    e.stopPropagation();
+    if (e.key === 'Enter' && chatinput.value.trim()) {
+      const t = chatinput.value.trim();
+      chatinput.value = '';
+      chatbox.style.display = 'none';
+      lastHover = null;   // 聊天框关了，恢复点击穿透的重新评估
+      chat(t);
+    } else if (e.key === 'Escape') {
+      chatbox.style.display = 'none';
+      lastHover = null;
+    }
+  });
+
+  // ---- 设置菜单（左键点她打开/关闭） ----
+  const menu = document.getElementById('menu');
+  function positionMenu() {
+    if (menu.style.display !== 'block') return;
+    menu.style.left = Math.max(4, Math.min(x + DW / 2 - 62, window.innerWidth - 130)) + 'px';
+    menu.style.top = Math.max(2, FLOOR() - 130) + 'px';
+  }
+  function closeMenu() {
+    menu.style.display = 'none';
+    // 菜单曾强制窗口"接收点击"，关闭后必须让下次 mousemove 重新评估穿透，
+    // 否则整条窗口会一直吞掉她左右两边的点击
+    lastHover = null;
+  }
+  function toggleMenu() {
+    if (menu.style.display === 'block') { closeMenu(); return; }
+    chatbox.style.display = 'none';
+    menu.style.display = 'block';
+    positionMenu();
+    if (ipc) ipc.send('set-ignore', false);   // 菜单要接收点击
+    lastHover = false;
+  }
+  const btnRest = document.getElementById('btn-rest');
+  // 原地休整：赐福直接在她身边浮现，坐下（手动触发，坐约 8 分钟）
+  function startRestInPlace() {
+    manualRest = true;
+    restPending = false;
+    // 默认放她右边（火苗在右，她坐左边）；贴右边缘则放左边
+    graceX = Math.round(x + DW - 15);
+    if (graceX > window.innerWidth - GDW - 4) graceX = Math.round(x - GDW + 15);
+    graceX = Math.max(0, Math.min(graceX, window.innerWidth - GDW));
+    if (graceImg) { gcvs.style.display = 'block'; graceTarget = 1; }
+    state = 'rest';
+    stateUntil = performance.now() + 480000;
+    animClock = 0;
+    // 坐下后开始（续）讲交界地的故事
+    if (storyIdx >= STORY.length) storyIdx = 0;
+    nextStoryAt = performance.now() + 9000;
+    nextDozeAt = performance.now() + 18000 + Math.random() * 20000;
+    console.log('REST: manual in-place at', x, 'graceX', graceX);
+    say('……好，在这里稍作休整。', 3000);
+  }
+  btnRest.addEventListener('click', () => {
+    closeMenu();
+    if (dragging || state === 'drag') return;
+    // 已经在手动休整中：让她起来活动
+    if (state === 'rest' && manualRest) {
+      manualRest = false;
+      graceTarget = 0;
+      restCooldown = performance.now() + 30000;
+      playSpecial('wave', 1800);
+      say('……走吧。', 2400);
+      return;
+    }
+    if (!graceImg || !frames.sit) return;
+    startRestInPlace();
+  });
+  // 让菜单按钮文字跟随状态
+  function refreshRestBtn() {
+    btnRest.textContent = (state === 'rest' && manualRest) ? '起来活动' : '去赐福休整';
+  }
+  setInterval(refreshRestBtn, 500);
+  document.getElementById('btn-home').addEventListener('click', () => {
+    closeMenu();
+    restPending = false; manualRest = false; graceTarget = 0;    // 收掉赐福
+    if (ipc) ipc.send('go-home');
+    playSpecial('wave', 1800);
+    say('……回地面吧。', 2600);
+  });
+  document.getElementById('btn-quit').addEventListener('click', () => {
+    if (ipc) ipc.send('quit-app');
+    window.close();
+  });
+
+  // ---- 动作列表面板：所有动作摆出来，点哪个做哪个 ----
+  const actPanel = document.getElementById('actions');
+  const ACT_LIST = [
+    ['wave', '挥手', 1800], ['jump', '跳跃', 1500], ['bounce', '蹦跳', 1400],
+    ['blink', '掩面', 1500], ['wait', '发呆', 2600], ['nod', '点头', 1600],
+    ['shake', '摇头', 1600], ['dance', '蹦迪', 2600], ['failed', '沮丧', 2200],
+    ['walk', '走两步', 0], ['doze', '打盹', 0]
+  ];
+  function closeActions() {
+    actPanel.style.display = 'none';
+    lastHover = null;   // 面板关了，恢复点击穿透的重新评估
+  }
+  function toggleActions() {
+    if (actPanel.style.display === 'block') { closeActions(); return; }
+    closeMenu();
+    chatbox.style.display = 'none';
+    actPanel.style.display = 'block';
+    actPanel.style.left = Math.max(4, Math.min(x + DW / 2 - 122, window.innerWidth - 248)) + 'px';
+    actPanel.style.top = Math.max(2, FLOOR() - 256) + 'px';
+    if (ipc) ipc.send('set-ignore', false);   // 面板要接收点击
+    lastHover = false;
+  }
+  for (const [name, label, ms] of ACT_LIST) {
+    const b = document.createElement('button');
+    b.textContent = label;
+    b.addEventListener('click', () => {
+      closeActions();
+      if (dragging || state === 'drag') return;
+      if (name === 'walk') {
+        state = 'walk';
+        facing = Math.random() < 0.5 ? -1 : 1;
+        stateUntil = performance.now() + 3200;
+        animClock = 0;
+      } else if (name === 'doze') {
+        if (!graceImg || !frames.sit) { playSpecial('nod', 1600); return; }
+        startRestInPlace();
+        dozeUntil = performance.now() + 12000;   // 坐下后直接低头打盹
+      } else {
+        playSpecial(name, ms);
+      }
+    });
+    actPanel.appendChild(b);
+  }
+  document.getElementById('btn-acts').addEventListener('click', () => {
+    menu.style.display = 'none';
+    toggleActions();
+  });
+
+  // ---- 命中检测（按当前帧的 alpha） ----
+  function pixelHit(clientX, clientY) {
+    if (!sheet) return false;
+    const r = cvs.getBoundingClientRect();
+    const px = Math.floor((clientX - r.left) / SCALE);
+    const py = Math.floor((clientY - r.top) / SCALE);
+    if (px < 0 || py < 0 || px >= CELL_W || py >= CELL_H) return false;
+    const name = currentAnim();
+    let data = hitData[name] && hitData[name][frameIdx % hitData[name].length];
+    if (!data) data = hitData['idle'] && hitData['idle'][0];   // 兜底，保证坐着也能点
+    if (!data) return false;
+    return data[py * CELL_W + px] > 10;
+  }
+  function currentAnim() {
+    if (state === 'walk') return facing === 1 ? 'runRight' : 'runLeft';
+    if (state === 'special') return specialName;
+    if (state === 'drag') return 'failed';
+    if (state === 'rest') return performance.now() < dozeUntil ? 'doze' : 'sit';    // 坐赐福休整：静坐/低头打盹
+    return 'idle';
+  }
+
+  // ---- 命中检测扩展：赐福也可感知（仅浮现时可点，不可拖） ----
+  function graceHitAt(clientX, clientY) {
+    if (!graceHit || graceAlpha < 0.5) return false;
+    const r = gcvs.getBoundingClientRect();
+    const px = Math.floor((clientX - r.left) * (GW / r.width));
+    const py = Math.floor((clientY - r.top) * (GH / r.height));
+    if (px < 0 || py < 0 || px >= GW || py >= GH) return false;
+    return graceHit[py * GW + px] > 10;
+  }
+
+  // ---- Electron：点击穿透 + 拖动 + 单击/拖拽区分 ----
+  let lastHover = null;
+  let downX = 0, downY = 0, grabMoved = false, clickTimer = null;
+  let headHoverSince = 0, patCooldown = 0;
+  window.addEventListener('mousemove', (e) => {
+    if (dragging && e.buttons === 0) { endDrag(); return; }   // 拖拽中按键已松开（事件补漏）
+    if (dragging) {
+      // 拖拽中：窗口由主进程轮询光标移动，这里只锁定不穿透
+      if (lastHover !== false && ipc) { ipc.send('set-ignore', false); lastHover = false; }
+      if (!grabMoved && Math.hypot(e.clientX - downX, e.clientY - downY) > 6) {
+        grabMoved = true;
+        clearTimeout(clickTimer);            // 拖起来了，取消单击
+        closeMenu();
+        closeActions();
+        // 拖拽打断休整：赐福消散
+        if (state === 'rest' || restPending) { restPending = false; manualRest = false; graceTarget = 0; }
+        state = 'drag';
+        say(GRAB_LINES[Math.floor(Math.random() * GRAB_LINES.length)], 3500);
+      }
+      return;
+    }
+    if (chatbox.style.display === 'block' || menu.style.display === 'block' || actPanel.style.display === 'block') {
+      if (lastHover !== false && ipc) { ipc.send('set-ignore', false); lastHover = false; }
+      return;
+    }
+    const hit = pixelHit(e.clientX, e.clientY) || graceHitAt(e.clientX, e.clientY);
+    if (ipc && hit !== lastHover) { ipc.send('set-ignore', hit ? false : true); lastHover = hit; }
+    // 摸头反应：光标在她头顶停留 ~0.9 秒
+    if (pixelHit(e.clientX, e.clientY)) {
+      const r = cvs.getBoundingClientRect();
+      if (e.clientY - r.top < DH * 0.35) {
+        if (!headHoverSince) headHoverSince = performance.now();
+        else if (performance.now() - headHoverSince > 900 && performance.now() > patCooldown && state !== 'drag') {
+          patCooldown = performance.now() + 15000;
+          headHoverSince = 0;
+          playSpecial('blink', 1500);
+          say(PAT_LINES[Math.floor(Math.random() * PAT_LINES.length)], 3200);
+        }
+      } else headHoverSince = 0;
+    } else headHoverSince = 0;
+  });
+  cvs.addEventListener('mousedown', (e) => {
+    // 右键：打开/关闭设置菜单（不触发拖拽）
+    if (e.button === 2 && pixelHit(e.clientX, e.clientY)) {
+      e.preventDefault();
+      if (dragging) return;
+      clearTimeout(clickTimer);
+      toggleMenu();
+      return;
+    }
+    if (e.button !== 0 || !pixelHit(e.clientX, e.clientY)) return;
+    clearTimeout(clickTimer);
+    dragging = true; grabMoved = false;
+    downX = e.clientX; downY = e.clientY;
+    if (ipc) {
+      const r = cvs.getBoundingClientRect();
+      // 抓取点相对"精灵左上角"的偏移 + 精灵尺寸/窗口内偏移，交给主进程做钳制
+      ipc.send('drag-start', {
+        gx: e.screenX - (window.screenX + r.left),
+        gy: e.screenY - (window.screenY + r.top),
+        dw: DW, dh: DH, floor: FLOOR()
+      });
+    }
+  });
+  // 屏蔽系统右键菜单（右键已被用作设置菜单）
+  window.addEventListener('contextmenu', (e) => e.preventDefault());
+  function endDrag() {
+    if (!dragging) return;
+    dragging = false;
+    lastHover = null;                        // 强制下一帧重新评估穿透
+    if (ipc) ipc.send('drag-end');
+    if (grabMoved) {
+      // 被拎起来又放下：落地 + 小情绪
+      state = 'idle'; stateUntil = performance.now() + 1200; animClock = 0;
+      playSpecial('failed', 2200);
+      if (Math.random() < 0.7) say(DROP_LINES[Math.floor(Math.random() * DROP_LINES.length)], 3000);
+    } else {
+      // 左键单击：轻轻应一声（设置菜单已改为右键打开）
+      say(CLICK_LINES[Math.floor(Math.random() * CLICK_LINES.length)], 2600);
+    }
+  }
+  window.addEventListener('mouseup', endDrag);
+  window.addEventListener('blur', endDrag);  // 焦点丢失也强制结束，防拖拽卡死
+
+  // ---- 主循环 ----
+  let last = performance.now();
+  const WALK_SPEED = 42;
+  function tick(now) {
+    const dt = now - last; last = now;
+    animClock += dt;
+
+    if (!sheet) { requestAnimationFrame(tick); return; }
+
+    if (state === 'idle') {
+      if (isChatting()) {
+        // 对话中：安静站着，不触发任何随机事件
+        stateUntil = now + 1000;
+      } else if (now > stateUntil) {
+        const roll = Math.random();
+        // 休整不再限地面：拖到哪个高度，赐福就在哪浮现（跟她的窗口走）
+        const canRest = graceImg && frames.sit && now > restCooldown;
+        if (canRest && roll < 0.22) {
+          // 走回赐福休息：每次都换个新落点（像游戏里沿路的赐福）
+          pickGraceSpot();
+          restPending = true;
+          state = 'walk';
+          const target = Math.max(0, graceX - DW + 15);   // 坐在赐福左侧，不挡火苗
+          facing = target >= x ? 1 : -1;
+          stateUntil = now + 15000;
+          console.log('REST: walking to', target, 'from', x);
+        } else if (roll < 0.42) {
+          state = 'walk';
+          facing = Math.random() < 0.5 ? -1 : 1;
+          stateUntil = now + 1600 + Math.random() * 3600;
+        } else if (roll < 0.49) {
+          state = 'special'; specialName = 'wave';
+          stateUntil = now + 1800;
+        } else if (roll < 0.56) {
+          state = 'special'; specialName = 'jump';
+          stateUntil = now + 1500;
+        } else if (roll < 0.62) {
+          state = 'special'; specialName = 'bounce';
+          stateUntil = now + 1400;
+        } else if (roll < 0.70) {
+          state = 'special'; specialName = 'blink';
+          stateUntil = now + 1500;
+        } else if (roll < 0.77) {
+          state = 'special'; specialName = 'wait';
+          stateUntil = now + 2600;
+        } else if (roll < 0.83) {
+          state = 'special'; specialName = 'nod';       // 点头
+          stateUntil = now + 1600;
+        } else if (roll < 0.88) {
+          state = 'special'; specialName = 'shake';     // 摇头
+          stateUntil = now + 1600;
+        } else if (roll < 0.93) {
+          state = 'special'; specialName = 'dance';     // 蹦迪
+          stateUntil = now + 2600;
+        } else {
+          // 发会儿呆，原地站着
+          stateUntil = now + 2500 + Math.random() * 3000;
+        }
+        animClock = 0;
+      }
+    } else if (state === 'walk') {
+      if (isChatting()) {
+        // 对话中：停下脚步，取消去休整的路程
+        if (restPending) { restPending = false; graceTarget = 0; }
+        state = 'idle';
+        stateUntil = now + 1000;
+        animClock = 0;
+      } else if (restPending) {
+        const target = Math.max(0, graceX - DW + 15);
+        x += facing * WALK_SPEED * dt / 1000;
+        const arrived = (facing === 1 && x >= target) || (facing === -1 && x <= target);
+        if (arrived || now > stateUntil) {
+          restPending = false;
+          if (arrived) {
+            x = target;
+            // 到达：赐福浮现，她坐下休整
+            if (graceImg) { gcvs.style.display = 'block'; graceTarget = 1; }
+            state = 'rest';
+            // 手动休整坐得久（约 8 分钟），自动遛弯的随机休整保持原时长
+            stateUntil = now + (manualRest ? 480000 : 10000 + Math.random() * 12000);
+            console.log('REST: arrived, sitting until', Math.round(stateUntil), manualRest ? '(manual)' : '(auto)');
+            say(REST_LINES[Math.floor(Math.random() * REST_LINES.length)], 5200);
+            // 坐下后开始（续）讲交界地的故事
+            if (storyIdx >= STORY.length) storyIdx = 0;   // 讲完一轮，从头再来
+            nextStoryAt = now + 9000;
+            nextDozeAt = now + 18000 + Math.random() * 20000;
+          } else {
+            state = 'idle';
+            stateUntil = now + 2000;
+          }
+          animClock = 0;
+        }
+      } else {
+        x += facing * WALK_SPEED * dt / 1000;
+        const maxX = window.innerWidth - DW;
+        if (x <= 0) { x = 0; facing = 1; }
+        if (x >= maxX) { x = maxX; facing = -1; }
+        if (now > stateUntil) { state = 'idle'; stateUntil = now + 2000 + Math.random() * 5000; animClock = 0; }
+      }
+    } else if (state === 'rest') {
+      if (isChatting()) {
+        // 对话中：坐着聊，不自动起身，讲故事也暂停
+        stateUntil = now + 1000;
+        nextStoryAt = Math.max(nextStoryAt, now + 4000);
+      } else if (now > stateUntil) {
+        // 休整结束：赐福消散，挥手道别后继续遛弯
+        graceTarget = 0;
+        restCooldown = now + 40000 + Math.random() * 20000;
+        state = 'special'; specialName = 'wave';
+        stateUntil = now + 1800;
+        animClock = 0;
+      } else if (now > nextDozeAt) {
+        // 坐着打盹：低头眯一会儿，故事照常讲
+        dozeUntil = now + 7000 + Math.random() * 6000;
+        nextDozeAt = now + 30000 + Math.random() * 30000;
+      } else if (storyIdx < STORY.length && now > nextStoryAt) {
+        // 坐赐福讲故事：每 20 秒一集
+        say(STORY[storyIdx], 16500);
+        storyIdx++;
+        nextStoryAt = now + 20000;
+      }
+    } else if (state === 'drag') {
+      // 被拎着：保持沮丧表情，等 mouseup
+    } else { // special
+      if (now > stateUntil) { state = 'idle'; stateUntil = now + 1500 + Math.random() * 4000; animClock = 0; }
+    }
+
+    // 帧序号
+    const anim = currentAnim();
+    const fpsMap = { idle: 7, wave: 5, wait: 5, bounce: 9, blink: 6, failed: 8, jump: 11, nod: 3, shake: 6, dance: 9, doze: 2.5 };
+    // 坐赐福时静坐呼吸：1.1fps 极慢两帧循环
+    const fps = (state === 'rest' && anim === 'sit') ? 1.1 : (fpsMap[anim] || 11);
+    frameIdx = Math.floor(animClock / (1000 / fps));
+
+    place();
+    placeGrace();
+    drawGrace(now, dt);
+    positionBubble();   // 气泡跟着她走
+    positionMenu();     // 菜单也跟着
+    ctx.clearRect(0, 0, CELL_W, CELL_H);
+    const fr = frames[anim];
+    if (fr && fr.length) {
+      ctx.drawImage(fr[frameIdx % fr.length], 0, 0);
+    }
+    requestAnimationFrame(tick);
+  }
+  requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>
