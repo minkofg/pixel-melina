@@ -181,7 +181,6 @@
   }
   loadStrip('sit_sheet.png', 'sit', 2);
   loadStrip('nod_sheet.png', 'nod', 4);
-  loadStrip('shake_sheet.png', 'shake', 8);
   loadStrip('doze_sheet.png', 'doze', 6);
   loadStrip('dance_sheet.png', 'dance', 8);   // 蹦迪：独立生成的摇摆+小跳+音符动画
 
@@ -516,7 +515,7 @@
   const ACT_LIST = [
     ['wave', '挥手', 1800], ['jump', '跳跃', 1500], ['bounce', '蹦跳', 1400],
     ['blink', '掩面', 1500], ['wait', '发呆', 2600], ['nod', '点头', 1600],
-    ['shake', '摇头', 1600], ['dance', '蹦迪', 2600], ['failed', '沮丧', 2200],
+    ['nod', '点头', 1600], ['dance', '蹦迪', 2600], ['failed', '沮丧', 2200],
     ['walk', '走两步', 0], ['doze', '打盹', 0]
   ];
   function closeActions() {
@@ -725,9 +724,6 @@
           state = 'special'; specialName = 'nod';       // 点头
           stateUntil = now + 1600;
         } else if (roll < 0.88) {
-          state = 'special'; specialName = 'shake';     // 摇头
-          stateUntil = now + 1600;
-        } else if (roll < 0.93) {
           state = 'special'; specialName = 'dance';     // 蹦迪
           stateUntil = now + 2600;
         } else {
@@ -805,7 +801,7 @@
 
     // 帧序号
     const anim = currentAnim();
-    const fpsMap = { idle: 7, wave: 5, wait: 5, bounce: 9, blink: 6, failed: 8, jump: 11, nod: 3, shake: 6, dance: 9, doze: 2.5 };
+    const fpsMap = { idle: 7, wave: 5, wait: 5, bounce: 9, blink: 6, failed: 8, jump: 11, nod: 3, dance: 9, doze: 2.5 };
     // 坐赐福时静坐呼吸：1.1fps 极慢两帧循环
     const fps = (state === 'rest' && anim === 'sit') ? 1.1 : (fpsMap[anim] || 11);
     frameIdx = Math.floor(animClock / (1000 / fps));
