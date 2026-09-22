@@ -6,7 +6,7 @@
 
 ## 下载
 
-去 [Releases](../../releases) 页面下载 `PixelMelina-v1.2.zip`，解压后双击 `启动梅琳娜.bat` 即可。
+去 [Releases](../../releases) 页面下载 `PixelMelina-v1.3.zip`，解压后双击 `启动梅琳娜.bat` 即可。
 
 - 系统：Windows 10/11 x64，内存 8GB+
 - 无需安装任何东西：Electron 运行时、本地模型、推理引擎全都在包里
